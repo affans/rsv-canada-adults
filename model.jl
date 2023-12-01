@@ -44,11 +44,30 @@ const humans = Array{Human}(undef, 0)
 const p = ModelParameters()  ## setup default parameters
 pc(x) = Int(round(x / p.totalpopulation * p.popsize)) # convert to per-capita
 
+function run_all_sims() 
+    vtypes = [GSK, PFI]
+    vscenarios = ["S1", "S2"]
+    vprofiles = ["fixed", "sigmoidal"]
+    for vtype in vtypes 
+        for vscenario in vscenarios 
+            for vprofile in vprofiles 
+                p.vaccine_type = vtype 
+                p.vaccine_scenario = vscenario 
+                p.vaccine_profile = vprofile 
+                #fname = "$(p.vaccine_type)_$(p.vaccine_scenario)_$(p.vaccine_profile).csv"
+                #@info "running simulation for $(fname)"
+                simulate()
+            end
+        end
+    end 
+end
+
 function simulate() 
-    reset_params() # reset parameter values
+    #reset_params() # reset parameter values
     length(humans) == 0 && error("run reset_params() first")
-    #logger = Logging.NullLogger()
-    #global_logger(logger)
+    
+    logger = Logging.NullLogger()
+    global_logger(logger)
     Random.seed!(53)
    
     # create a dataframe with dynamically generated column names 
@@ -65,14 +84,14 @@ function simulate()
     df_wivax = DataFrame([name => [] for name in names])
 
     # set up vaccine parameters 
-    p.vaccine_profile = "fixed"
-    p.vaccine_scenario = "S1"
-    p.vaccine_type = GSK
+    #p.vaccine_profile = "fixed"
+    #p.vaccine_scenario = "S2"
+    #p.vaccine_type = GSK
 
     fname_novax = "$(p.vaccine_type)_$(p.vaccine_scenario)_$(p.vaccine_profile)_novaccine.csv"
     fname_vax = "$(p.vaccine_type)_$(p.vaccine_scenario)_$(p.vaccine_profile)_wivaccine.csv"
     
-    for sim in ProgressBar(1:50)
+    for sim in ProgressBar(1:1000)
         initialize_population() # initialize the population 
         initialize_vaccine() # initialize the vaccine efficacies
         
@@ -307,8 +326,8 @@ function _distribute_incidence(inftype, infmatrix)
     return ctr
 end
 
-function _distribute_hosp(inftype, infmatrix) 
-    prop_ltcf = 0.10 #rand(Uniform(0.08, 0.15))
+function _distribute_hosp(inftype, infmatrix, prop_ltcf) 
+    
     ctr = 0
     for (ag, r) in enumerate(eachrow(infmatrix))  # each row is an age group: 12, 34, 56
         
@@ -355,12 +374,14 @@ function incidence()
                    0.225014937, 0.167146155, 0.0970358, 0.043135959, 0.015993756, 0.0072403]
 
     # sample incidence MA
-    inc_ag12 = rand(420:838); inc_ag34 = rand(278:565); inc_ag56 = rand(169:322)
+    inc_ag12 = rand(410:905); inc_ag34 = rand(274:599); inc_ag56 = rand(172:365)
     sampled_incidence = [inc_ag12, inc_ag12, inc_ag34, inc_ag34, inc_ag56, inc_ag56] .* agegroup_proportions()
     seasonal_incidence = sampled_incidence * transpose(month_distr)
     
     # sample hospitalization 
-    hosp_ag12 = rand(17:25); hosp_ag34 = rand(23:35); hosp_ag56 = rand(43:60)
+    hosp_inc_from_data = rand(118:172) # From Open Form Infectious Diseases 2023 (canadian paper)
+    #[0.18*hosp_inc_from_data, 0.18*hosp_inc_from_data, ]
+    hosp_ag12 = 0.18*hosp_inc_from_data; hosp_ag34 = 0.26*hosp_inc_from_data; hosp_ag56 = 0.56*hosp_inc_from_data
     sampled_hospitalization = [hosp_ag12, hosp_ag12, hosp_ag34, hosp_ag34, hosp_ag56, hosp_ag56] .* agegroup_proportions()
     seasonal_hospitalization = round.(Int, sampled_hospitalization * transpose(month_distr))
     total_hosp = sum(seasonal_hospitalization) # different than sampled_hosp cuz of rounding but should be very close
@@ -373,7 +394,7 @@ function incidence()
     
     # sample deaths Categorical([5.3, 12.5, 14.1, 25.7, 20.9, 21.5] ./ 100) # NOTE: ONLY FIVE AGE GROUPS
     # seasonal_death = [sum(rand(x) .< 0.061) for x in seasonal_hospitalization]
-    seasonal_death = seasonal_death_distribute(seasonal_hospitalization)
+    seasonal_death = new_death_distribution(seasonal_hospitalization) # seasonal_death_distribute(seasonal_hospitalization)
     total_death = sum(seasonal_death)
 
     # sample the ICU/MV/GW
@@ -399,17 +420,43 @@ function incidence()
     # all_matrices = [seasonal_outpatient, seasonal_emergency, seasonal_gw, seasonal_icu, seasonal_mv]
     i1 = _distribute_incidence(OP, seasonal_outpatient)
     i2 = _distribute_incidence(ED, seasonal_emergency)
-    i3 = _distribute_hosp(GW, seasonal_gw)
-    i4 = _distribute_hosp(ICU, seasonal_icu)
-    i5 = _distribute_hosp(MV, seasonal_mv)
-    i6 = _distribute_hosp(DEATH, seasonal_death)
-    println("total sick: $(i1 + i2 + i3 + i4 + i5 + i6)")
+    prop_ltcf = rand(Uniform(0.08, 0.15))
+    i3 = _distribute_hosp(GW, seasonal_gw, prop_ltcf)
+    i4 = _distribute_hosp(ICU, seasonal_icu, prop_ltcf)
+    i5 = _distribute_hosp(MV, seasonal_mv, prop_ltcf)
+    i6 = _distribute_hosp(DEATH, seasonal_death, prop_ltcf)
     return  
 end 
 
+function new_death_distribution(seasonal_hosp) 
+
+    death_probs = [7.6, 7.6, 8.1, 8.1, 14.0, 14.0] ./ 100 
+    seasonal_death = zeros(Int64, 6, 12)
+    for (ag, r) in enumerate(eachrow(seasonal_hosp))
+        death_prob = death_probs[ag]
+
+        for mth in 1:12 
+            hosp_cnt = r[mth] 
+            death_cnt = rand(hosp_cnt) .< death_prob
+            seasonal_death[ag, mth] = sum(death_cnt)
+        end
+    end
+
+    ## test the function 
+    #prop = sum.(eachrow(seasonal_death))  ./ sum.(eachrow(seasonal_hosp)) .* 100
+    #@info "seasonal death" seasonal_death
+    #@info "proportion of death: $prop"
+    # return prop 
+
+    return seasonal_death
+end
+
 function seasonal_death_distribute(seasonal_hosp)
+    # given total hospitalization stratified by agegroup, use MC to sample the number of deaths over the season
+    ## OLD FUNCTION: NOT USED ANYMORE -- USING DEATH PROBABILITIES  
+
     total_hosp = sum(seasonal_hosp)
-    total_death2 = round.(Int, 0.061 * total_hosp)
+    total_death2 = round.(Int, 0.11 * total_hosp)
     death_probs = Categorical([5.3, 12.5, 14.1, 25.7, 20.9, 21.5] ./ 100)  # last two age groups split by seyed 
     death_in_ag = rand(death_probs, total_death2)
     cm = countmap(death_in_ag)
@@ -561,7 +608,9 @@ function calculate_qalys()
         split_data[1, 1] = sum(split_data[2:end, 1])  # sum up the qalys for each age group for the top row 
         
         all_dead = findall(x -> x.rsvtype == DEATH && x.dwelling == dw, humans) 
-        wgt_qalylost = [9.47, 7.79, 5.93, 4.49, 2.97, 1.49]
+        # wgt_qalylost = [9.47, 7.79, 5.93, 4.49, 2.97, 1.49]
+        wgt_qalylost = [10.4, 8.4, 6.3, 4.7, 3.1, 1.5]
+        
         for i in all_dead
             x = humans[i] 
             ag = x.agegroup
@@ -580,7 +629,6 @@ function run_vaccine()
     all_sick = humans[findall(x -> Int(x.rsvtype) > 0, humans)] # find all sick individuals to calculate their outcomes
     for x in all_sick  
         rn = rand() 
-        println("x.rsvmonth:  $(x.rsvmonth) $(Int(x.rsvmonth))")
         if x.rsvtype == OP || x.rsvtype == ED  # they become NMA 
             if rn < x.vaxeff_op[Int(x.rsvmonth)]
                 x.rsvtype = NMA
