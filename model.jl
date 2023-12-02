@@ -17,7 +17,7 @@ Base.@kwdef mutable struct Human
     comorbidity::Int64 = 0 # 0 no comorbidity, 1, 2, 3: comorbidities, 4: 4+ comorbidities
     dwelling::Int64 = 0    # 1 = LTCF, 2 = community
     rsvtype::INFTYPE = SUSC # 1 = outpatient, 2 = emergency, 3 = hospital
-    rsvmonth::MONTHS = UNDEF  # month of RSV 
+    rsvmonth::Int64 = 0  # month of RSV 
     rsvdays::Dict{String, Float64} = Dict("nma" => 0.0, "symp" => 0.0, "gw" => 0.0, "icu" => 0.0, "mv" => 0.0)
     vaccinated::Bool = false 
     vaxmonth::MONTHS = SEP  # default
@@ -95,13 +95,17 @@ function simulate()
         initialize_population() # initialize the population 
         initialize_vaccine() # initialize the vaccine efficacies
         
-        p.current_season = 1 # set the default season
+        
+        for ssn in (1, 2)  
+            p.current_season = ssn # set the default season
+            # run through rsv incidence
+            incidence() # sample incidence - OP, ED, HOSP, and death
+        end
 
-        # run through rsv simulation
-        incidence() # sample incidence - OP, ED, HOSP, and death
         sample_days() # sample the number of days for each type of infection
         sample_qaly_weights() # sample the qaly weights for each infected person (could move right after incidence()
 
+        
         # at this point save the data before running the vaccine function 
         _df = create_data_file() 
         map(x -> push!(df_novax, (sim, x...)), eachrow(_df)) # populate the dataframe 
@@ -146,7 +150,7 @@ end
 function mth_indices() 
     # either returns [1, 2, 3, 4, 5, 6, 7, 8, 9] 
     # or [13, 14, 15, 16, 17, 18, 19, 20, 21]
-    month_indices = [1, 2, 3, 4, 5, 6, 7, 8, 9] .+ (12 * (p.current_season - 1))
+    month_indices = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] .+ (12 * (p.current_season - 1))
 end
 
 
@@ -317,7 +321,7 @@ function _distribute_incidence(inftype, infmatrix)
                 hidx = pop!(human_idx)
                 x = humans[hidx] 
                 x.rsvtype = inftype  
-                x.rsvmonth = MONTHS(mth) # could also pop! tog
+                x.rsvmonth = mth_indices()[mth] # could also pop! tog
                 ctr += 1 
             end 
         end
@@ -356,7 +360,7 @@ function _distribute_hosp(inftype, infmatrix, prop_ltcf)
                 hidx = pop!(humans_idx)
                 x = humans[hidx] 
                 x.rsvtype = inftype  
-                x.rsvmonth = MONTHS(mth) # could also pop! tog
+                x.rsvmonth = mth_indices()[mth] # could also pop! tog
                 ctr += 1 
             end 
         end
@@ -630,14 +634,14 @@ function run_vaccine()
     for x in all_sick  
         rn = rand() 
         if x.rsvtype == OP || x.rsvtype == ED  # they become NMA 
-            if rn < x.vaxeff_op[Int(x.rsvmonth)]
+            if rn < x.vaxeff_op[x.rsvmonth]
                 x.rsvtype = NMA
                 op_to_nma += 1
                 sample_inf_days_human(x)
             end
         end 
         if x.rsvtype in (GW, ICU, MV, DEATH)
-            if rn < x.vaxeff_ip[Int(x.rsvmonth)]
+            if rn < x.vaxeff_ip[x.rsvmonth]
                 x.rsvtype = OP
                 ip_to_op += 1
                 sample_inf_days_human(x)
