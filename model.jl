@@ -18,7 +18,18 @@ Base.@kwdef mutable struct Human
     dwelling::Int64 = 0    # 1 = LTCF, 2 = community
     rsvtype::INFTYPE = SUSC # 1 = outpatient, 2 = emergency, 3 = hospital
     rsvmonth::Int64 = 0  # month of RSV 
-    rsvdays::Dict{String, Float64} = Dict("nma" => 0.0, "symp" => 0.0, "gw" => 0.0, "icu" => 0.0, "mv" => 0.0)
+    rsvdays_sampled::Dict{String, Float64} = Dict(
+        "nmadays" => 0.0, 
+        "sympdays_oped" => 0.0,  # symptomatic days - no hospitalization
+        "sympdays_hosp" => 0.0,  # symptomatic days - with hospitalization (GW, ICU, MV, DEATH)
+        "gwdays_noicu" => 0.0,  # general ward days - no ICU, 
+        "gwdays_preicu" => 0.0,  # general ward days - prior to ICU, 
+        "gwdays_posticu" => 0.0, # general ward days - post ICU, 
+        "icudays_nomv" => 0.0,    # ICU days if NOT going to MV
+        "icudays_mv" => 0.0,      # ICU days if going to MV
+        "mvdays" => 0.0,         # MV days
+    )
+    rsvdays::Dict{String, Float64} = Dict("nma" => 0.0, "symp" => 0.0, "gw" => 0.0, "icu" => 0.0, "mv" => 0.0) 
     vaccinated::Bool = false 
     vaxmonth::MONTHS = SEP  # default
     vaxtype::VAXTYPE = GSK # 1 
@@ -30,6 +41,7 @@ Base.show(io::IO, ::MIME"text/plain", z::Human) = dump(z)
 
 ## system parameters
 Base.@kwdef mutable struct ModelParameters    ## use @with_kw from Parameters
+    simid::Int64 = 0 # a ctr to keep track of simulation ID currently running
     popsize::Int64 = 100000
     numofsims::Int64 = 1000
     totalpopulation = 3_779_102 # from Seyed 
@@ -37,6 +49,7 @@ Base.@kwdef mutable struct ModelParameters    ## use @with_kw from Parameters
     vaccine_type::VAXTYPE = GSK # 0 - gsk, 1 pfizer 
     vaccine_profile::String = "fixed"   # or sigmoidal
     current_season::Int64 = 1 # either running 1 season or 2 seasons 
+    stochastic_infdays::Bool = true # should we sample days for each human infection or use fixed values?
 end
 
 # constant variables
@@ -87,14 +100,14 @@ function simulate()
     #p.vaccine_profile = "fixed"
     #p.vaccine_scenario = "S2"
     #p.vaccine_type = GSK
-
-    fname_novax = "$(p.vaccine_type)_$(p.vaccine_scenario)_$(p.vaccine_profile)_novaccine.csv"
-    fname_vax = "$(p.vaccine_type)_$(p.vaccine_scenario)_$(p.vaccine_profile)_wivaccine.csv"
+    is_stochastic = p.stochastic_infdays ? "stochastic" : "nonstochastic"
+    fname_novax = "$(p.vaccine_type)_$(p.vaccine_scenario)_$(p.vaccine_profile)_$(is_stochastic)_novaccine.csv"
+    fname_vax = "$(p.vaccine_type)_$(p.vaccine_scenario)_$(p.vaccine_profile)_$(is_stochastic)_wivaccine.csv"
     
     for sim in ProgressBar(1:1000)
+        p.simid = sim # assign the correct simid
         initialize_population() # initialize the population 
         initialize_vaccine() # initialize the vaccine efficacies
-        
         
         for ssn in (1, 2)  
             p.current_season = ssn # set the default season
@@ -223,8 +236,54 @@ function initialize_population()
 
     @info "total in dwelling 1: $(length(findall(x -> x.dwelling == 1, humans)))"
     @info "total in dwelling 2: $(length(findall(x -> x.dwelling == 2, humans)))"
-
+    
+    ## initialize infection days
+    initialize_infdays()
     return 
+end
+
+
+function initialize_infdays() 
+    # we want to sample all the possible hospital/icu days for each type of infection
+    # at the start of the simulation -- we do this so that we can turn stochasticity off 
+    # for sensitivity analysis (PRCC)
+
+    # sample days for each human
+    prm_nmadays = rand(Uniform(2, 8), length(humans))
+    prm_sympdays_oped = rand(Uniform(7, 14), length(humans))   # symptomatic days - no hospitalization
+    prm_sympdays_hosp = rand(Gamma(4.3266,0.9434), length(humans))  # symptomatic days - with hospitalization (GW, ICU, MV, DEATH)
+    prm_gwdays_noicu = rand(Gamma(3.0658, 3.4254), length(humans))   # general ward days - no ICU, 
+    prm_gwdays_preicu = rand(Gamma(2.0673, 1.2438), length(humans))  # general ward days - prior to ICU, 
+    prm_gwdays_posticu = rand(Gamma(1.1092, 11.2493), length(humans)) # general ward days - post ICU, 
+    prm_icudays_nomv = rand(Gamma(4.1049,1.2876), length(humans))    # ICU days if NOT going to MV
+    prm_icudays_mv = rand(Gamma(1.5910,3.4570), length(humans))     # ICU days if going to MV
+    prm_mvdays = rand(Gamma(1.4306, 7.5620), length(humans))         # MV days
+    
+    if !(p.stochastic_infdays)
+        prm_nmadays[2:end] .= prm_nmadays[1]
+        prm_sympdays_oped[2:end] .= prm_sympdays_oped[1]
+        prm_sympdays_hosp[2:end] .= prm_sympdays_hosp[1]
+        prm_gwdays_noicu[2:end] .= prm_gwdays_noicu[1]
+        prm_gwdays_preicu[2:end] .= prm_gwdays_preicu[1]
+        prm_gwdays_posticu[2:end] .= prm_gwdays_posticu[1]
+        prm_icudays_nomv[2:end] .= prm_icudays_nomv[1]
+        prm_icudays_mv[2:end] .= prm_icudays_mv[1]
+        prm_mvdays[2:end] .= prm_mvdays[1]
+    end
+    
+    # go through each human and assign their days 
+    for i in 1:length(humans)
+        x = humans[i]
+        x.rsvdays_sampled["nmadays"] = prm_nmadays[x.idx]
+        x.rsvdays_sampled["sympdays_oped"] = prm_sympdays_oped[x.idx]
+        x.rsvdays_sampled["sympdays_hosp"] = prm_sympdays_hosp[x.idx]
+        x.rsvdays_sampled["gwdays_noicu"] = prm_gwdays_noicu[x.idx]
+        x.rsvdays_sampled["gwdays_preicu"] = prm_gwdays_preicu[x.idx]
+        x.rsvdays_sampled["gwdays_posticu"] = prm_gwdays_posticu[x.idx]
+        x.rsvdays_sampled["icudays_nomv"] = prm_icudays_nomv[x.idx]
+        x.rsvdays_sampled["icudays_mv"] = prm_icudays_mv[x.idx]
+        x.rsvdays_sampled["mvdays"] = prm_mvdays[x.idx]
+    end
 end
 
 function initialize_vaccine() 
@@ -502,33 +561,34 @@ function sample_inf_days_human(x::Human)
     icudays = 0.0
     mvdays = 0.0
 
+    # get the days from the sampled days dictionary that was initialized at sim start
     if rsvtype == NMA 
-        nmadays += rand(Uniform(2, 8)) 
+        nmadays += x.rsvdays_sampled["nmadays"] 
     elseif rsvtype in (OP, ED) 
-        sympdays += rand(Uniform(7, 14))
+        sympdays += x.rsvdays_sampled["sympdays_oped"]
     elseif rsvtype == GW 
-        sympdays += rand(Gamma(4.3266,0.9434))
-        gwdays += rand(Gamma(3.0658, 3.4254))
+        sympdays += x.rsvdays_sampled["sympdays_hosp"]
+        gwdays += x.rsvdays_sampled["gwdays_noicu"]
     elseif rsvtype == ICU 
-        sympdays += rand(Gamma(4.3266,0.9434))
-        gwdays += rand(Gamma(2.0673, 1.2438)) 
-        icudays += rand(Gamma(4.1049,1.2876))
-        gwdays += rand(Gamma(1.1092, 11.2493)) # post ICU
+        sympdays += x.rsvdays_sampled["sympdays_hosp"]
+        gwdays += x.rsvdays_sampled["gwdays_preicu"]
+        icudays += x.rsvdays_sampled["icudays_nomv"]
+        gwdays += x.rsvdays_sampled["gwdays_posticu"]
     elseif rsvtype == MV 
-        sympdays += rand(Gamma(4.3266,0.9434)) 
-        gwdays += rand(Gamma(2.0673, 1.2438)) # pre ICU 
-        icudays += rand(Gamma(1.5910,3.4570)) # in ICU but prior to moving to MV 
-        mvdays += rand(Gamma(1.4306, 7.5620))  # mechanical ventilation
-        gwdays += rand(Gamma(1.1092, 11.2493)) # post ICU
+        sympdays += x.rsvdays_sampled["sympdays_hosp"]
+        gwdays += x.rsvdays_sampled["gwdays_preicu"]
+        icudays += x.rsvdays_sampled["icudays_mv"] # in ICU but prior to moving to MV 
+        mvdays += x.rsvdays_sampled["mvdays"]  # mechanical ventilation
+        gwdays += x.rsvdays_sampled["gwdays_posticu"]
     elseif rsvtype == DEATH
-        sympdays += rand(Gamma(4.3266,0.9434)) 
-        gwdays += rand(Gamma(2.0673, 1.2438)) # pre ICU 
+        sympdays += x.rsvdays_sampled["sympdays_hosp"]
+        gwdays += x.rsvdays_sampled["gwdays_preicu"]
         if rand() < 0.523 # assume 52.3% of deaths are in MV, the rest in ICU
-            icudays += rand(Gamma(1.5910,3.4570)) # in ICU but prior to moving to MV 
-            mvdays += rand(Gamma(1.4306, 7.5620))  # mechanical ventilation
+            icudays += x.rsvdays_sampled["icudays_mv"] # in ICU but prior to moving to MV 
+            mvdays += x.rsvdays_sampled["mvdays"]  # mechanical ventilation
             # no post GW days because assume person death in MV/ICU
         else 
-            icudays += rand(Gamma(4.1049,1.2876))
+            icudays += x.rsvdays_sampled["icudays_nomv"]
         end
     end
 
