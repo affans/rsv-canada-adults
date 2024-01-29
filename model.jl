@@ -5,6 +5,7 @@ using StatsBase, Random
 using Distributions, DataFrames
 using Logging, CSV, ProgressBars, IterTools
 using Logging
+using DelimitedFiles
 
 @enum INFTYPE SUSC=0 NMA=1 OP=2 ED=3 GW=4 ICU=5 MV=6 DEATH=7
 @enum VAXTYPE GSK=1 PFI=2
@@ -41,7 +42,7 @@ Base.show(io::IO, ::MIME"text/plain", z::Human) = dump(z)
 
 ## system parameters
 Base.@kwdef mutable struct ModelParameters    ## use @with_kw from Parameters
-    simid::Int64 = 0 # a ctr to keep track of simulation ID currently running
+    simid::Int64 = 0
     popsize::Int64 = 100000
     numofsims::Int64 = 1000
     totalpopulation = 3_779_102 # from Seyed 
@@ -52,15 +53,39 @@ Base.@kwdef mutable struct ModelParameters    ## use @with_kw from Parameters
     stochastic_infdays::Bool = true # should we sample days for each human infection or use fixed values?
 end
 
+## simulation specific parameters -- once a parameter is sampled, save it in this struct 
+Base.@kwdef mutable struct SimParameters    ## use @with_kw from Parameters
+    prm_prop_ed::Vector{Float64} = zeros(Float64, 10000)
+    prm_prop_icu_admit::Vector{Float64} = zeros(Float64, 10000)
+    prm_prop_mv_admit::Vector{Float64} = zeros(Float64, 10000)
+    prm_prop_ltcf::Vector{Float64} = zeros(Float64, 10000)
+    prm_mortality_rate_ag1::Vector{Float64} = zeros(Float64, 10000)
+    prm_mortality_rate_ag2::Vector{Float64} = zeros(Float64, 10000)
+    prm_mortality_rate_ag3::Vector{Float64} = zeros(Float64, 10000)
+    prm_nmadays::Vector{Float64} = zeros(Float64, 10000)
+    prm_sympdays_oped::Vector{Float64} = zeros(Float64, 10000)
+    prm_sympdays_hosp::Vector{Float64} = zeros(Float64, 10000)
+    prm_gwdays_noicu::Vector{Float64} = zeros(Float64, 10000)
+    prm_gwdays_preicu::Vector{Float64} = zeros(Float64, 10000)
+    prm_gwdays_posticu::Vector{Float64} = zeros(Float64, 10000)
+    prm_icudays_nomv::Vector{Float64} = zeros(Float64, 10000)
+    prm_icudays_mv::Vector{Float64} = zeros(Float64, 10000)
+    prm_mvdays::Vector{Float64} = zeros(Float64, 10000)
+end
+
 # constant variables
 const humans = Array{Human}(undef, 0) 
 const p = ModelParameters()  ## setup default parameters
+const smp = SimParameters()
 pc(x) = Int(round(x / p.totalpopulation * p.popsize)) # convert to per-capita
 
 function run_all_sims() 
-    vtypes = [GSK, PFI]
-    vscenarios = ["S1", "S2"]
-    vprofiles = ["fixed", "sigmoidal"]
+    #vtypes = [GSK, PFI]
+    #vscenarios = ["S1", "S2"]
+    #vprofiles = ["fixed", "sigmoidal"]
+    vtypes = [GSK]
+    vscenarios = ["S2"]
+    vprofiles = ["fixed"]
     for vtype in vtypes 
         for vscenario in vscenarios 
             for vprofile in vprofiles 
@@ -96,6 +121,11 @@ function simulate()
     df_novax = DataFrame([name => [] for name in names])
     df_wivax = DataFrame([name => [] for name in names])
 
+
+    # we want to fix the inf days for all humans 
+    # so turn off the stochasticity
+    p.stochastic_infdays = false 
+
     # set up vaccine parameters 
     #p.vaccine_profile = "fixed"
     #p.vaccine_scenario = "S2"
@@ -104,8 +134,8 @@ function simulate()
     fname_novax = "$(p.vaccine_type)_$(p.vaccine_scenario)_$(p.vaccine_profile)_$(is_stochastic)_novaccine.csv"
     fname_vax = "$(p.vaccine_type)_$(p.vaccine_scenario)_$(p.vaccine_profile)_$(is_stochastic)_wivaccine.csv"
     
-    for sim in ProgressBar(1:1000)
-        p.simid = sim # assign the correct simid
+    for sim in ProgressBar(1:10000)
+        p.simid = sim
         initialize_population() # initialize the population 
         initialize_vaccine() # initialize the vaccine efficacies
         
@@ -117,8 +147,6 @@ function simulate()
 
         sample_days() # sample the number of days for each type of infection
         sample_qaly_weights() # sample the qaly weights for each infected person (could move right after incidence()
-
-        
         # at this point save the data before running the vaccine function 
         _df = create_data_file() 
         map(x -> push!(df_novax, (sim, x...)), eachrow(_df)) # populate the dataframe 
@@ -132,6 +160,12 @@ function simulate()
     
     CSV.write("$(fname_novax)", df_novax)
     CSV.write("$(fname_vax)", df_wivax)
+
+    prcc_matrix = [smp.prm_prop_ed smp.prm_prop_icu_admit smp.prm_prop_mv_admit smp.prm_prop_ltcf smp.prm_mortality_rate_ag1 smp.prm_mortality_rate_ag2 smp.prm_mortality_rate_ag3 ;;
+    smp.prm_nmadays smp.prm_sympdays_oped smp.prm_sympdays_hosp smp.prm_gwdays_noicu smp.prm_gwdays_preicu smp.prm_gwdays_posticu smp.prm_icudays_nomv smp.prm_icudays_mv smp.prm_mvdays] 
+    writedlm("prcc_matrix.csv", prcc_matrix)
+
+
 end
 
 function create_data_file() 
@@ -269,6 +303,18 @@ function initialize_infdays()
         prm_icudays_nomv[2:end] .= prm_icudays_nomv[1]
         prm_icudays_mv[2:end] .= prm_icudays_mv[1]
         prm_mvdays[2:end] .= prm_mvdays[1]
+
+        # save in the SimParameter struct to print out later
+        smp.prm_nmadays[p.simid] = prm_nmadays[1]
+        smp.prm_sympdays_oped[p.simid] = prm_sympdays_oped[1]
+        smp.prm_sympdays_hosp[p.simid] = prm_sympdays_hosp[1]
+        smp.prm_gwdays_noicu[p.simid] = prm_gwdays_noicu[1]
+        smp.prm_gwdays_preicu[p.simid] = prm_gwdays_preicu[1]
+        smp.prm_gwdays_posticu[p.simid] = prm_gwdays_posticu[1]
+        smp.prm_icudays_nomv[p.simid] = prm_icudays_nomv[1]
+        smp.prm_icudays_mv[p.simid] = prm_icudays_mv[1]
+        smp.prm_mvdays[p.simid] = prm_mvdays[1]
+
     end
     
     # go through each human and assign their days 
@@ -437,12 +483,16 @@ function incidence()
                    0.225014937, 0.167146155, 0.0970358, 0.043135959, 0.015993756, 0.0072403]
 
     # sample incidence MA
-    inc_ag12 = rand(410:905); inc_ag34 = rand(274:599); inc_ag56 = rand(172:365)
+    #inc_ag12 = rand(410:905); inc_ag34 = rand(274:599); inc_ag56 = rand(172:365)
+    inc_ag12 = 657; inc_ag34 = 436; inc_ag56 = 268
+
     sampled_incidence = [inc_ag12, inc_ag12, inc_ag34, inc_ag34, inc_ag56, inc_ag56] .* agegroup_proportions()
     seasonal_incidence = sampled_incidence * transpose(month_distr)
     
     # sample hospitalization 
-    hosp_inc_from_data = rand(118:172) # From Open Form Infectious Diseases 2023 (canadian paper)
+    # hosp_inc_from_data = rand(118:172) # From Open Form Infectious Diseases 2023 (canadian paper)
+    hosp_inc_from_data = 145
+
     #[0.18*hosp_inc_from_data, 0.18*hosp_inc_from_data, ]
     hosp_ag12 = 0.18*hosp_inc_from_data; hosp_ag34 = 0.26*hosp_inc_from_data; hosp_ag56 = 0.56*hosp_inc_from_data
     sampled_hospitalization = [hosp_ag12, hosp_ag12, hosp_ag34, hosp_ag34, hosp_ag56, hosp_ag56] .* agegroup_proportions()
@@ -450,7 +500,8 @@ function incidence()
     total_hosp = sum(seasonal_hospitalization) # different than sampled_hosp cuz of rounding but should be very close
 
     # proportion of overall incidence are ED
-    seasonal_emergency = round.(Int, rand(Uniform(0.06, 0.09)) .* seasonal_incidence)
+    prop_ed = rand(Uniform(0.06, 0.09))
+    seasonal_emergency = round.(Int, prop_ed .* seasonal_incidence)
 
     # The left over are outpatient (OP = incidence - ED - HOSP)
     seasonal_outpatient = round.(Int, seasonal_incidence .- seasonal_emergency .- seasonal_hospitalization)
@@ -462,10 +513,12 @@ function incidence()
 
     # sample the ICU/MV/GW
     #seasonal_icu_and_mv = [sum(rand(x) .< 0.135) for x in seasonal_hospitalization]
-    seasonal_icu_and_mv = [sum(rand(x) .< 0.074) for x in seasonal_hospitalization] # it's actually 13.5% but 6.1% death sampled up there are assumed to be also part of ICU/MV (Their days are sampled as ICU/MV)
+    prop_icu_admit = rand(Uniform(0.11, 0.15)) - 0.061 # original: 0.074 --  it's actually 13.5% but 6.1% death sampled up there are assumed to be also part of ICU/MV (Their days are sampled as ICU/MV)
+    seasonal_icu_and_mv = [sum(rand(x) .< prop_icu_admit) for x in seasonal_hospitalization] # it's actually 13.5% but 6.1% death sampled up there are assumed to be also part of ICU/MV (Their days are sampled as ICU/MV)
     
     # split between icu/mv/gw
-    seasonal_mv = [sum(rand(x) .< 0.523) for x in seasonal_icu_and_mv]
+    prop_mv_admit =  rand(Uniform(0.40, 0.60)) # original: 0.523
+    seasonal_mv = [sum(rand(x) .< prop_mv_admit) for x in seasonal_icu_and_mv]
     seasonal_icu = seasonal_icu_and_mv .- seasonal_mv
     seasonal_gw = seasonal_hospitalization .- seasonal_icu_and_mv .- seasonal_death  # this gives us the general ward 
     
@@ -488,12 +541,22 @@ function incidence()
     i4 = _distribute_hosp(ICU, seasonal_icu, prop_ltcf)
     i5 = _distribute_hosp(MV, seasonal_mv, prop_ltcf)
     i6 = _distribute_hosp(DEATH, seasonal_death, prop_ltcf)
+
+    # save the sampled parameters 
+    smp.prm_prop_ed[p.simid] = prop_ed
+    smp.prm_prop_ltcf[p.simid] = prop_ltcf
+    smp.prm_prop_icu_admit[p.simid] = prop_icu_admit
+    smp.prm_prop_mv_admit[p.simid] = prop_mv_admit
+    
     return  
 end 
 
 function new_death_distribution(seasonal_hosp) 
-
-    death_probs = [7.6, 7.6, 8.1, 8.1, 14.0, 14.0] ./ 100 
+    #death_probs = [7.6, 7.6, 8.1, 8.1, 14.0, 14.0] ./ 100 
+    prop_ag1 = rand(Uniform(0.05, 0.10))
+    prop_ag2 = rand(Uniform(0.06, 0.10))
+    prop_ag3 = rand(Uniform(0.10, 0.18))
+    death_probs = [prop_ag1, prop_ag1, prop_ag2, prop_ag2, prop_ag3, prop_ag3]
     seasonal_death = zeros(Int64, 6, 12)
     for (ag, r) in enumerate(eachrow(seasonal_hosp))
         death_prob = death_probs[ag]
@@ -504,6 +567,12 @@ function new_death_distribution(seasonal_hosp)
             seasonal_death[ag, mth] = sum(death_cnt)
         end
     end
+
+    # save the sampled parameters 
+    smp.prm_mortality_rate_ag1[p.simid] = prop_ag1
+    smp.prm_mortality_rate_ag2[p.simid] = prop_ag2
+    smp.prm_mortality_rate_ag3[p.simid] = prop_ag3
+    
 
     ## test the function 
     #prop = sum.(eachrow(seasonal_death))  ./ sum.(eachrow(seasonal_hosp)) .* 100
