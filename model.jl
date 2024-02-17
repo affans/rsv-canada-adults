@@ -255,7 +255,7 @@ function initialize_vaccine()
     
     # 90% of S1 are vaccinated in the first month
     S1_eligible = findall(x -> x.dwelling == 1 && rand() < 0.90, humans)
-    S2_eligible = findall(x -> x.dwelling == 2 && rand() < 0.74, humans)
+    S2_eligible = findall(x -> x.dwelling == 2 && x.agegroup >= 4 && rand() < 0.74, humans)
     @info "S1 eligible: $(length(S1_eligible))"
     @info "S2 eligible: $(length(S2_eligible))"
 
